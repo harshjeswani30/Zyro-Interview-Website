@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     const supabase = createAdminClient()
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('full_name, is_premium, trial_start_at, sessions_balance')
+      .select('full_name, is_premium, sessions_balance')
       .eq('id', userId)
       .maybeSingle()
 

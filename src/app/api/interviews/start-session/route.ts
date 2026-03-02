@@ -3,8 +3,8 @@
 // Handles BOTH paid-session users and free-trial users:
 //   - Paid (sessions_balance >= 1): deducts one session
 //   - is_premium: passes through with no deduction
-//   - Trial (first use): stamps trial_start_at in DB, returns 600s
-//   - Trial (used):      calculates remaining seconds, rejects with 'trial_expired' if 0
+//   - Trial (trial_seconds_used < 600): returns remaining seconds
+//   - Trial (trial_seconds_used >= 600): rejects with 'trial_expired'
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/utils/supabase/admin'
 import crypto from 'crypto'
@@ -37,7 +37,7 @@ export async function POST(request: NextRequest) {
 
     const { data: profile, error: profErr } = await supabase
       .from('profiles')
-      .select('sessions_balance, is_premium, trial_start_at')
+      .select('sessions_balance, is_premium, trial_seconds_used')
       .eq('id', userId)
       .maybeSingle()
 
@@ -97,59 +97,27 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const now = Date.now()
+    const secondsUsed: number = profile.trial_seconds_used ?? 0
+    const remaining = Math.max(0, TRIAL_SECONDS - secondsUsed)
 
-    if (profile.trial_start_at) {
-      // Trial already started — check how much time is left
-      const elapsed = (now - new Date(profile.trial_start_at).getTime()) / 1000
-      const remaining = Math.max(0, TRIAL_SECONDS - elapsed)
-
-      if (remaining <= 0) {
-        // Trial fully consumed — hard block; user must buy a session
-        return NextResponse.json(
-          {
-            error:   'trial_expired',
-            message: 'Your 10‑minute free trial has been used. Please purchase a session to continue.',
-          },
-          { status: 402 }
-        )
-      }
-
-      // Still has time remaining
-      return NextResponse.json({
-        success:       true,
-        isPremium:     false,
-        trialTimeLeft: Math.floor(remaining),
-        trialStartAt:  profile.trial_start_at, // ISO timestamp — client anchors its timer to this
-        sessionId:     crypto.randomUUID(),
-      })
-    }
-
-    // First-ever trial — stamp the start time in DB now
-    const trialStartAt = new Date(now).toISOString()
-    const { data: stamped, error: stampErr } = await supabase
-      .from('profiles')
-      .update({ trial_start_at: trialStartAt })
-      .eq('id', userId)
-      .select('trial_start_at')
-      .single()
-
-    if (stampErr || !stamped?.trial_start_at) {
-      console.error('[start-session] CRITICAL: Failed to stamp trial_start_at for user', userId, stampErr)
+    if (remaining <= 0) {
       return NextResponse.json(
-        { error: 'Failed to initialize trial. Please try again.' },
-        { status: 500 }
+        {
+          error:   'trial_expired',
+          message: 'Your 10\u2011minute free trial has been used. Please purchase a session to continue.',
+        },
+        { status: 402 }
       )
     }
 
-    console.log('[start-session] Trial started for user', userId, 'at', stamped.trial_start_at)
+    console.log(`[start-session] Trial for user ${userId}: ${secondsUsed}s used, ${remaining}s left`)
 
     return NextResponse.json({
-      success:       true,
-      isPremium:     false,
-      trialTimeLeft: TRIAL_SECONDS,
-      trialStartAt:  stamped.trial_start_at,
-      sessionId:     crypto.randomUUID(),
+      success:          true,
+      isPremium:        false,
+      trialTimeLeft:    remaining,
+      trialSecondsUsed: secondsUsed,
+      sessionId:        crypto.randomUUID(),
     })
 
   } catch (err: any) {

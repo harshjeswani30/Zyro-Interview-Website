@@ -17,7 +17,6 @@ interface Profile {
   full_name: string | null;
   is_premium: boolean;
   sessions_balance: number | null;
-  trial_start_at: string | null;
   trial_seconds_used: number;
 }
 
@@ -160,7 +159,7 @@ function DashboardContent() {
       if (!userIdRef.current) return;
       const { data } = await supabase
         .from('profiles')
-        .select('sessions_balance, is_premium, trial_start_at, trial_seconds_used')
+        .select('sessions_balance, is_premium, trial_seconds_used')
         .eq('id', userIdRef.current)
         .single();
       if (data) setProfile(prev => prev ? { ...prev, ...data, trial_seconds_used: data.trial_seconds_used ?? 0 } : prev);
@@ -200,7 +199,7 @@ function DashboardContent() {
 
   const trial = getTrialInfo(
     profile?.trial_seconds_used ?? 0,
-    !!profile?.trial_start_at,
+    (profile?.trial_seconds_used ?? 0) > 0,
     now - profileUpdatedAtRef.current
   );
   const balance = profile?.sessions_balance ?? 0;

@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
 
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('sessions_balance, is_premium, trial_start_at, trial_seconds_used, full_name, email')
+      .select('sessions_balance, is_premium, trial_seconds_used, full_name, email')
       .eq('id', userId)
       .maybeSingle()
 
@@ -50,18 +50,10 @@ export async function POST(request: NextRequest) {
     // Compute trial state server-side — this is authoritative.
     // trial_seconds_used tracks ACTUAL interview seconds used (not wall-clock),
     // so closing the app and reopening later doesn't burn the trial.
-    const trialStartAt: string | null = profile.trial_start_at ?? null
     const trialSecondsUsed: number = profile.trial_seconds_used ?? 0
-    let trialExpired = false
-    let trialTimeLeft: number | null = null
-    let trialEverStarted = false
-
-    if (trialStartAt) {
-      trialEverStarted = true
-      const remaining = Math.max(0, TRIAL_SECONDS - trialSecondsUsed)
-      trialTimeLeft = remaining
-      trialExpired = remaining <= 0
-    }
+    const trialEverStarted = trialSecondsUsed > 0
+    const trialTimeLeft = Math.max(0, TRIAL_SECONDS - trialSecondsUsed)
+    const trialExpired = trialSecondsUsed >= TRIAL_SECONDS
 
     // Check if paid (has any purchases) — paid users can never reclaim trial
     const { count: purchaseCount } = await supabase
@@ -77,7 +69,6 @@ export async function POST(request: NextRequest) {
       sessions_balance:     profile.sessions_balance ?? 0,
       is_premium:           profile.is_premium ?? false,
       has_purchases:        hasPurchases,
-      trial_start_at:       trialStartAt,
       trial_ever_started:   trialEverStarted,
       trial_expired:        trialExpired,
       trial_time_left:      trialTimeLeft,
