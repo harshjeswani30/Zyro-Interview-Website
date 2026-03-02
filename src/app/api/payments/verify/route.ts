@@ -47,14 +47,21 @@ export async function POST(request: NextRequest) {
     // 4. Credit sessions to user's profile
     const { data: profile } = await supabase
       .from('profiles')
-      .select('sessions_balance')
+      .select('sessions_balance, trial_start_at')
       .eq('id', userId)
       .maybeSingle()
 
     const currentBalance = profile?.sessions_balance ?? 0
+
+    // Permanently block the free trial for anyone who buys sessions.
+    // Set trial_start_at to epoch so the trial always reads as expired.
+    const trialUpdate = profile?.trial_start_at
+      ? {} // already stamped — don't overwrite
+      : { trial_start_at: new Date(0).toISOString() }
+
     await supabase
       .from('profiles')
-      .update({ sessions_balance: currentBalance + purchase.sessions_granted })
+      .update({ sessions_balance: currentBalance + purchase.sessions_granted, ...trialUpdate })
       .eq('id', userId)
 
     return NextResponse.json({

@@ -79,6 +79,24 @@ export async function POST(request: NextRequest) {
     }
 
     // ─── Free trial path ─────────────────────────────────────────────────────
+    // If the user has ever purchased sessions (even if all are spent), deny trial.
+    // This prevents paid users from falling back to the free trial.
+    const { count: purchaseCount } = await supabase
+      .from('purchases')
+      .select('id', { count: 'exact', head: true })
+      .eq('user_id', userId)
+      .eq('status', 'paid')
+
+    if ((purchaseCount ?? 0) > 0) {
+      return NextResponse.json(
+        {
+          error:   'no_sessions',
+          message: 'You have no sessions remaining. Please purchase more to continue.',
+        },
+        { status: 402 }
+      )
+    }
+
     const now = Date.now()
 
     if (profile.trial_start_at) {
