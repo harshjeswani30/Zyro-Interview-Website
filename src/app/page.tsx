@@ -125,6 +125,49 @@ export default function LandingPage() {
         </div>
       </section>
 
+      {/* Pricing Section */}
+      <section id="pricing" className="py-24 px-6 bg-black/20">
+        <div className="max-w-7xl mx-auto text-center mb-16">
+          <h2 className="text-3xl md:text-4xl font-bold mb-4">Simple, Pay-Per-Session Pricing</h2>
+          <p className="text-white/40">No subscriptions. Sessions never expire. Buy once, use anytime.</p>
+        </div>
+        <div className="max-w-5xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-6">
+          {[
+            { name: '1 Session', price: '₹300', per: '₹300 / session', saving: null, popular: false },
+            { name: '5 Sessions', price: '₹1,200', per: '₹240 / session', saving: 'Save 20%', popular: true },
+            { name: '10 Sessions', price: '₹2,000', per: '₹200 / session', saving: 'Save 33%', popular: false },
+          ].map((plan, i) => (
+            <div key={i} className={`glass-card p-8 text-center flex flex-col items-center relative ${plan.popular ? 'border-primary/60 shadow-xl shadow-primary/10' : ''}`}>
+              {plan.popular && (
+                <div className="absolute -top-3 px-4 py-1 bg-primary rounded-full text-white text-xs font-bold uppercase tracking-wider">
+                  Popular
+                </div>
+              )}
+              {plan.saving && (
+                <div className="absolute top-4 right-4 text-[10px] font-black uppercase text-green-400 bg-green-400/10 border border-green-400/20 px-2 py-0.5 rounded-full">
+                  {plan.saving}
+                </div>
+              )}
+              <h3 className="text-xl font-bold mb-2 mt-2">{plan.name}</h3>
+              <div className="text-4xl font-extrabold mb-1">{plan.price}</div>
+              <p className="text-white/30 text-sm mb-6">{plan.per}</p>
+              <Link
+                href="/pricing"
+                className={`w-full py-3 rounded-2xl font-bold text-sm text-center block transition-all hover:scale-105 ${plan.popular ? 'bg-primary text-white' : 'bg-white/5 border border-white/10 text-white hover:bg-white/10'}`}
+              >
+                Buy Now →
+              </Link>
+            </div>
+          ))}
+        </div>
+        <div className="text-center mt-10">
+          <Link href="/pricing" className="text-primary hover:underline text-sm font-medium flex items-center justify-center gap-1">
+            View full pricing details →
+          </Link>
+          <p className="text-white/30 text-xs mt-3">Free 10-min trial available · No credit card required to start</p>
+        </div>
+      </section>
+
       {/* Trial Section */}
       <section className="py-40 px-6 overflow-hidden relative">
         <div className="max-w-4xl mx-auto glass-card p-12 md:p-20 text-center relative z-10">

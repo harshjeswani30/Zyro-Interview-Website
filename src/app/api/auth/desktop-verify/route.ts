@@ -63,11 +63,22 @@ export async function POST(request: NextRequest) {
     // 6. Fetch profile data (trial/premium status) — uses admin client so RLS is bypassed
     const { data: profile } = await supabase
       .from('profiles')
-      .select('full_name, is_premium, trial_start_at')
+      .select('full_name, is_premium, trial_start_at, sessions_balance')
       .eq('id', user.id)
       .maybeSingle()
 
-    // 7. Return verified user + profile info for desktop app to store
+    // 7. Generate a long-lived desktop session token (10-year, silently refreshed on every launch)
+    //    Desktop stores this and uses it for start-session / profile-refresh calls.
+    const sessionToken = await new jose.SignJWT({
+      type: 'desktop_session',
+      sub: user.id,
+    })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .setExpirationTime('3650d')
+      .sign(secret)
+
+    // 8. Return verified user + profile + long-lived session token
     return NextResponse.json({
       success: true,
       user: {
@@ -75,6 +86,7 @@ export async function POST(request: NextRequest) {
         email: user.email,
       },
       profile: profile ?? null,
+      sessionToken,
     })
 
   } catch (err: any) {
