@@ -38,7 +38,7 @@ export async function POST(request: NextRequest) {
 
     const { data: profile, error } = await supabase
       .from('profiles')
-      .select('sessions_balance, is_premium, trial_start_at, full_name, email')
+      .select('sessions_balance, is_premium, trial_start_at, trial_seconds_used, full_name, email')
       .eq('id', userId)
       .maybeSingle()
 
@@ -47,18 +47,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
     }
 
-    // Compute trial state server-side — this is authoritative
-    const now = Date.now()
+    // Compute trial state server-side — this is authoritative.
+    // trial_seconds_used tracks ACTUAL interview seconds used (not wall-clock),
+    // so closing the app and reopening later doesn't burn the trial.
     const trialStartAt: string | null = profile.trial_start_at ?? null
+    const trialSecondsUsed: number = profile.trial_seconds_used ?? 0
     let trialExpired = false
     let trialTimeLeft: number | null = null
     let trialEverStarted = false
 
     if (trialStartAt) {
       trialEverStarted = true
-      const elapsed = (now - new Date(trialStartAt).getTime()) / 1000
-      const remaining = Math.max(0, TRIAL_SECONDS - elapsed)
-      trialTimeLeft = Math.floor(remaining)
+      const remaining = Math.max(0, TRIAL_SECONDS - trialSecondsUsed)
+      trialTimeLeft = remaining
       trialExpired = remaining <= 0
     }
 
@@ -72,15 +73,16 @@ export async function POST(request: NextRequest) {
     const hasPurchases = (purchaseCount ?? 0) > 0
 
     return NextResponse.json({
-      success:            true,
-      sessions_balance:   profile.sessions_balance ?? 0,
-      is_premium:         profile.is_premium ?? false,
-      has_purchases:      hasPurchases,
-      trial_start_at:     trialStartAt,
-      trial_ever_started: trialEverStarted,
-      trial_expired:      trialExpired,
-      trial_time_left:    trialTimeLeft,
-      full_name:          profile.full_name ?? null,
+      success:              true,
+      sessions_balance:     profile.sessions_balance ?? 0,
+      is_premium:           profile.is_premium ?? false,
+      has_purchases:        hasPurchases,
+      trial_start_at:       trialStartAt,
+      trial_ever_started:   trialEverStarted,
+      trial_expired:        trialExpired,
+      trial_time_left:      trialTimeLeft,
+      trial_seconds_used:   trialSecondsUsed,
+      full_name:            profile.full_name ?? null,
     })
   } catch (err: any) {
     console.error('[user/status] Error:', err)

@@ -18,6 +18,7 @@ interface Profile {
   is_premium: boolean;
   sessions_balance: number | null;
   trial_start_at: string | null;
+  trial_seconds_used: number;
 }
 
 // ─── Typewriter hook ─────────────────────────────────────────────────────────
@@ -52,19 +53,23 @@ function useNow() {
 }
 
 // ─── Trial info helper ────────────────────────────────────────────────────────
-function getTrialInfo(startAt: string | null, now: number) {
-  if (!startAt) return { label: '10:00 remaining', expired: false, percent: 100, seconds: 600 };
-  const start = new Date(startAt).getTime();
-  if (start < 1_000_000) return { label: 'Unavailable', expired: true, percent: 0, seconds: 0 };
-  const remaining = Math.max(0, 600_000 - (now - start));
-  if (remaining === 0) return { label: 'Expired', expired: true, percent: 0, seconds: 0 };
-  const m = Math.floor(remaining / 60000);
-  const s = Math.floor((remaining % 60000) / 1000);
+// secondsUsed  = trial_seconds_used from DB (cumulative interview seconds)
+// localDeltaMs = ms since the DB value was last refreshed (for smooth ticking)
+function getTrialInfo(secondsUsed: number, trialEverStarted: boolean, localDeltaMs: number) {
+  if (!trialEverStarted) return { label: '10:00 remaining', expired: false, percent: 100, seconds: 600 };
+  // Only mark expired when the DB confirms it (secondsUsed >= 600)
+  if (secondsUsed >= 600) return { label: 'Expired', expired: true, percent: 0, seconds: 0 };
+  // Add smooth local tick — capped at 12 s (slightly above the 10 s auto-save interval)
+  // so the clock never falsely shows "Expired" between saves.
+  const localSec = Math.min(Math.floor(localDeltaMs / 1000), 12);
+  const remaining = Math.max(0, 600 - secondsUsed - localSec);
+  const m = Math.floor(remaining / 60);
+  const s = remaining % 60;
   return {
     label: `${m}:${s.toString().padStart(2, '0')} left`,
     expired: false,
-    percent: (remaining / 600_000) * 100,
-    seconds: Math.floor(remaining / 1000),
+    percent: (remaining / 600) * 100,
+    seconds: remaining,
   };
 }
 
@@ -108,6 +113,9 @@ function DashboardContent() {
   const [activeNav, setActiveNav] = useState('overview');
   const now = useNow(); // ticks every second
   const userIdRef = useRef<string | null>(null);
+  // Track when trial_seconds_used was last updated so we can smooth-tick between DB saves
+  const profileUpdatedAtRef = useRef<number>(Date.now());
+  useEffect(() => { profileUpdatedAtRef.current = Date.now(); }, [profile?.trial_seconds_used]);
 
   const downloadRef = useRef<HTMLDivElement>(null);
   const highlightDownload = searchParams.get('highlight') === 'download';
@@ -125,7 +133,7 @@ function DashboardContent() {
       if (!user) { router.push('/login'); return; }
       userIdRef.current = user.id;
       const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
-      setProfile(data);
+      setProfile(data ? { ...data, trial_seconds_used: data.trial_seconds_used ?? 0 } : data);
       setLoading(false);
     })();
   }, []);
@@ -152,10 +160,10 @@ function DashboardContent() {
       if (!userIdRef.current) return;
       const { data } = await supabase
         .from('profiles')
-        .select('sessions_balance, is_premium, trial_start_at')
+        .select('sessions_balance, is_premium, trial_start_at, trial_seconds_used')
         .eq('id', userIdRef.current)
         .single();
-      if (data) setProfile(prev => prev ? { ...prev, ...data } : prev);
+      if (data) setProfile(prev => prev ? { ...prev, ...data, trial_seconds_used: data.trial_seconds_used ?? 0 } : prev);
     }, 30_000);
     return () => clearInterval(iv);
   }, []);
@@ -190,7 +198,11 @@ function DashboardContent() {
     );
   }
 
-  const trial = getTrialInfo(profile?.trial_start_at ?? null, now);
+  const trial = getTrialInfo(
+    profile?.trial_seconds_used ?? 0,
+    !!profile?.trial_start_at,
+    now - profileUpdatedAtRef.current
+  );
   const balance = profile?.sessions_balance ?? 0;
   const isPremium = profile?.is_premium ?? false;
   const hasSessions = balance > 0;
