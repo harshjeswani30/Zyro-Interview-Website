@@ -41,19 +41,30 @@ function useTypewriter(text: string, speed = 60, active = false) {
   return { displayed, done };
 }
 
+// ─── Live clock hook (ticks every second) ───────────────────────────────────
+function useNow() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const iv = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, []);
+  return now;
+}
+
 // ─── Trial info helper ────────────────────────────────────────────────────────
-function getTrialInfo(startAt: string | null) {
-  if (!startAt) return { label: '10:00 remaining', expired: false, percent: 100 };
+function getTrialInfo(startAt: string | null, now: number) {
+  if (!startAt) return { label: '10:00 remaining', expired: false, percent: 100, seconds: 600 };
   const start = new Date(startAt).getTime();
-  if (start < 1_000_000) return { label: 'Unavailable', expired: true, percent: 0 };
-  const remaining = Math.max(0, 600_000 - (Date.now() - start));
-  if (remaining === 0) return { label: 'Expired', expired: true, percent: 0 };
+  if (start < 1_000_000) return { label: 'Unavailable', expired: true, percent: 0, seconds: 0 };
+  const remaining = Math.max(0, 600_000 - (now - start));
+  if (remaining === 0) return { label: 'Expired', expired: true, percent: 0, seconds: 0 };
   const m = Math.floor(remaining / 60000);
   const s = Math.floor((remaining % 60000) / 1000);
   return {
     label: `${m}:${s.toString().padStart(2, '0')} left`,
     expired: false,
     percent: (remaining / 600_000) * 100,
+    seconds: Math.floor(remaining / 1000),
   };
 }
 
@@ -95,6 +106,8 @@ function DashboardContent() {
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeNav, setActiveNav] = useState('overview');
+  const now = useNow(); // ticks every second
+  const userIdRef = useRef<string | null>(null);
 
   const downloadRef = useRef<HTMLDivElement>(null);
   const highlightDownload = searchParams.get('highlight') === 'download';
@@ -105,14 +118,46 @@ function DashboardContent() {
     highlightDownload
   );
 
+  // ── Initial load ──────────────────────────────────────────────────────────
   useEffect(() => {
     (async () => {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) { router.push('/login'); return; }
+      userIdRef.current = user.id;
       const { data } = await supabase.from('profiles').select('*').eq('id', user.id).single();
       setProfile(data);
       setLoading(false);
     })();
+  }, []);
+
+  // ── Supabase Realtime: instant push when profile changes in DB ────────────
+  useEffect(() => {
+    if (!userIdRef.current) return;
+    const channel = supabase
+      .channel('profile-live')
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'profiles', filter: `id=eq.${userIdRef.current}` },
+        (payload) => {
+          setProfile(prev => prev ? { ...prev, ...(payload.new as Partial<Profile>) } : prev);
+        }
+      )
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [loading]); // re-subscribe once userId is known (loading flips to false)
+
+  // ── Background poll every 30 s (fallback for realtime gaps) ──────────────
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      if (!userIdRef.current) return;
+      const { data } = await supabase
+        .from('profiles')
+        .select('sessions_balance, is_premium, trial_start_at')
+        .eq('id', userIdRef.current)
+        .single();
+      if (data) setProfile(prev => prev ? { ...prev, ...data } : prev);
+    }, 30_000);
+    return () => clearInterval(iv);
   }, []);
 
   useEffect(() => {
@@ -145,7 +190,7 @@ function DashboardContent() {
     );
   }
 
-  const trial = getTrialInfo(profile?.trial_start_at ?? null);
+  const trial = getTrialInfo(profile?.trial_start_at ?? null, now);
   const balance = profile?.sessions_balance ?? 0;
   const isPremium = profile?.is_premium ?? false;
   const hasSessions = balance > 0;
