@@ -120,21 +120,35 @@ export async function POST(request: NextRequest) {
         success:       true,
         isPremium:     false,
         trialTimeLeft: Math.floor(remaining),
+        trialStartAt:  profile.trial_start_at, // ISO timestamp — client anchors its timer to this
         sessionId:     crypto.randomUUID(),
       })
     }
 
     // First-ever trial — stamp the start time in DB now
     const trialStartAt = new Date(now).toISOString()
-    await supabase
+    const { data: stamped, error: stampErr } = await supabase
       .from('profiles')
       .update({ trial_start_at: trialStartAt })
       .eq('id', userId)
+      .select('trial_start_at')
+      .single()
+
+    if (stampErr || !stamped?.trial_start_at) {
+      console.error('[start-session] CRITICAL: Failed to stamp trial_start_at for user', userId, stampErr)
+      return NextResponse.json(
+        { error: 'Failed to initialize trial. Please try again.' },
+        { status: 500 }
+      )
+    }
+
+    console.log('[start-session] Trial started for user', userId, 'at', stamped.trial_start_at)
 
     return NextResponse.json({
       success:       true,
       isPremium:     false,
       trialTimeLeft: TRIAL_SECONDS,
+      trialStartAt:  stamped.trial_start_at,
       sessionId:     crypto.randomUUID(),
     })
 
