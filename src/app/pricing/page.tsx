@@ -124,7 +124,8 @@ export default function PricingPage() {
 
   const handleBuy = async (plan: Plan) => {
     if (!plan.isPaid) {
-      window.location.href = '/login'
+      // Redirect logged-in users to dashboard download section, others to login
+      window.location.href = user ? '/dashboard?highlight=download' : '/login'
       return
     }
     if (!user) {
