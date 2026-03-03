@@ -1,6 +1,7 @@
-// POST /api/payments/verify
-// Called from frontend after Stripe Checkout redirect
-// Retrieves session from Stripe, marks purchase as paid, credits sessions to user
+﻿// POST /api/payments/verify
+// Fallback verification called from pricing page after Stripe redirect.
+// The webhook is the primary/authoritative way to credit sessions.
+// This acts as a safety net for cases where the webhook fires slowly.
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/utils/supabase/admin'
 import Stripe from 'stripe'
@@ -13,7 +14,6 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Missing session_id or userId' }, { status: 400 })
     }
 
-    // 1. Retrieve Stripe Checkout Session and verify payment status
     const stripe = new Stripe(process.env.STRIPE_SECRET_KEY!)
     const stripeSession = await stripe.checkout.sessions.retrieve(session_id)
 
@@ -21,73 +21,84 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Payment not completed' }, { status: 402 })
     }
 
-    // 2. Safeguard: ensure the session belongs to this user
+    // Verify session belongs to this user
     if (stripeSession.metadata?.userId !== userId) {
       return NextResponse.json({ error: 'User mismatch' }, { status: 403 })
     }
 
     const supabase = createAdminClient()
 
-    // 3. Find matching pending purchase (stripe session id stored in razorpay_order_id)
-    const { data: purchase, error: findErr } = await supabase
-      .from('purchases')
-      .select('*')
-      .eq('razorpay_order_id', session_id)
-      .eq('status', 'pending')
+    // Idempotency: check if webhook or a previous verify already handled this
+    const { data: existingEvent } = await supabase
+      .from('stripe_webhook_events')
+      .select('id')
+      .eq('id', `verify_${session_id}`)
       .maybeSingle()
 
-    if (findErr || !purchase) {
-      // Idempotency: if already paid, return success
-      const { data: paidPurchase } = await supabase
-        .from('purchases')
-        .select('sessions_granted')
-        .eq('razorpay_order_id', session_id)
-        .eq('status', 'paid')
-        .maybeSingle()
-      if (paidPurchase) {
-        return NextResponse.json({ success: true, alreadyProcessed: true, sessionsAdded: paidPurchase.sessions_granted })
-      }
-      return NextResponse.json({ error: 'Purchase record not found' }, { status: 404 })
+    if (existingEvent) {
+      const { data: profile } = await supabase
+        .from('profiles').select('sessions_balance').eq('id', userId).maybeSingle()
+      return NextResponse.json({
+        success: true, alreadyProcessed: true, newBalance: profile?.sessions_balance ?? 0,
+      })
     }
 
-    // 4. Mark purchase as paid
+    // Also check via purchase record
+    const { data: paidPurchase } = await supabase
+      .from('purchases')
+      .select('sessions_granted, status')
+      .or(`stripe_session_id.eq.${session_id},razorpay_order_id.eq.${session_id}`)
+      .eq('status', 'paid')
+      .maybeSingle()
+
+    if (paidPurchase) {
+      const { data: profile } = await supabase
+        .from('profiles').select('sessions_balance').eq('id', userId).maybeSingle()
+      return NextResponse.json({
+        success: true, alreadyProcessed: true, newBalance: profile?.sessions_balance ?? 0,
+      })
+    }
+
+    // Webhook hasn't fired yet — process as fallback
+    const planId = stripeSession.metadata?.planId
+    const SESSION_CREDITS: Record<string, number> = { session_1: 1, session_5: 5, session_10: 10 }
+    const sessionsToCredit = planId ? (SESSION_CREDITS[planId] ?? 0) : 0
+
+    if (sessionsToCredit === 0) {
+      return NextResponse.json({ error: 'Unknown plan or no sessions to credit' }, { status: 400 })
+    }
+
     const paymentIntentId = typeof stripeSession.payment_intent === 'string'
       ? stripeSession.payment_intent
-      : stripeSession.payment_intent?.id ?? null
+      : (stripeSession.payment_intent as any)?.id ?? null
 
-    await supabase
-      .from('purchases')
-      .update({
-        status:              'paid',
-        razorpay_payment_id: paymentIntentId,  // stores stripe payment_intent id
-        paid_at:             new Date().toISOString(),
-      })
-      .eq('id', purchase.id)
+    // Upsert purchase record
+    await supabase.from('purchases').upsert({
+      user_id:             userId,
+      plan_id:             planId,
+      sessions_granted:    sessionsToCredit,
+      amount_paise:        stripeSession.amount_total ?? 0,
+      razorpay_order_id:   session_id,
+      stripe_session_id:   session_id,
+      razorpay_payment_id: paymentIntentId,
+      status:              'paid',
+      paid_at:             new Date().toISOString(),
+    }, { onConflict: 'stripe_session_id', ignoreDuplicates: true })
 
-    // 5. Credit sessions to user's profile
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('sessions_balance')
-      .eq('id', userId)
-      .maybeSingle()
+    // Credit sessions via RPC
+    await supabase.rpc('credit_sessions', { p_user_id: userId, p_sessions: sessionsToCredit })
 
-    const currentBalance = profile?.sessions_balance ?? 0
+    // Mark processed so webhook doesn't double-credit
+    await supabase.from('stripe_webhook_events').upsert({
+      id: `verify_${session_id}`, type: 'verify_fallback',
+    }, { onConflict: 'id', ignoreDuplicates: true })
 
-    // Permanently block the free trial for anyone who buys sessions.
-    await supabase
-      .from('profiles')
-      .update({ sessions_balance: currentBalance + purchase.sessions_granted, trial_seconds_used: 600 })
-      .eq('id', userId)
-
-    // 6. Increment coupon used_count if a coupon was applied
-    if (purchase.coupon_id) {
-      await supabase.rpc('increment_coupon_usage', { coupon_id_arg: purchase.coupon_id })
-    }
+    const { data: updatedProfile } = await supabase
+      .from('profiles').select('sessions_balance').eq('id', userId).maybeSingle()
 
     return NextResponse.json({
-      success:       true,
-      sessionsAdded: purchase.sessions_granted,
-      newBalance:    currentBalance + purchase.sessions_granted,
+      success: true, sessionsAdded: sessionsToCredit,
+      newBalance: updatedProfile?.sessions_balance ?? 0,
     })
   } catch (err: any) {
     console.error('[verify-payment] Error:', err)

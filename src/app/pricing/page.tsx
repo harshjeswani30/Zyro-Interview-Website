@@ -139,7 +139,7 @@ export default function PricingPage() {
         if (data.success) {
           setMessage({
             type: 'success',
-            text: `✅ Payment successful! ${data.sessionsAdded} session(s) added. New balance: ${data.newBalance}. Re-login in the desktop app to refresh your balance.`,
+            text: `✅ Payment confirmed! ${data.alreadyProcessed ? 'Sessions were already credited.' : `${data.sessionsAdded} session(s) added.`} New balance: ${data.newBalance}. Open the desktop app — your balance updates automatically.`,
           })
         } else {
           setMessage({ type: 'error', text: data.error || 'Payment verification failed. Contact support.' })
