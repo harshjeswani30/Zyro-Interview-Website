@@ -24,9 +24,10 @@ export async function POST(request: NextRequest) {
 
     const origin = request.headers.get('origin') || 'https://zyro-interview-website.vercel.app'
 
-    // Create a Stripe Checkout Session with card + UPI + native promotion codes
+    // Create a Stripe Checkout Session — payment methods (card, UPI, etc.)
+    // are controlled via Stripe Dashboard → Settings → Payment methods
     const session = await stripe.checkout.sessions.create({
-      payment_method_types:  ['card', 'upi'],
+      automatic_payment_methods: { enabled: true },
       mode:                  'payment',
       customer_email:        userEmail,
       allow_promotion_codes: true,
