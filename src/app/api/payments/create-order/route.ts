@@ -20,14 +20,19 @@ export async function POST(request: NextRequest) {
     if (!userId)  return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
 
     const supabase = createAdminClient()
-    const stripe   = new Stripe(process.env.STRIPE_SECRET_KEY!)
+    const stripeKey = process.env.STRIPE_SECRET_KEY
+    if (!stripeKey) {
+      console.error('[create-order] STRIPE_SECRET_KEY is not set')
+      return NextResponse.json({ error: 'Payment gateway not configured' }, { status: 503 })
+    }
+    const stripe = new Stripe(stripeKey)
 
     const origin = request.headers.get('origin') || 'https://zyro-interview-website.vercel.app'
 
-    // Create a Stripe Checkout Session — payment methods (card, UPI, etc.)
-    // are controlled via Stripe Dashboard → Settings → Payment methods
-    const sessionParams = {
-      automatic_payment_methods: { enabled: true },
+    // Create a Stripe Checkout Session
+    // Note: automatic_payment_methods cannot be used with allow_promotion_codes
+    const session = await stripe.checkout.sessions.create({
+      payment_method_types: ['card'],
       mode:                  'payment',
       customer_email:        userEmail,
       allow_promotion_codes: true,
@@ -51,9 +56,7 @@ export async function POST(request: NextRequest) {
         planId,
         sessions: String(plan.sessions),
       },
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const session = await stripe.checkout.sessions.create(sessionParams as any)
+    })
 
     // Insert pending purchase record in DB
     await supabase.from('purchases').insert({
