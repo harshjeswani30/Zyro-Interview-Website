@@ -1,10 +1,7 @@
 // POST /api/interviews/start-session
 // Called by desktop app when user clicks "Start Interview".
-// Handles BOTH paid-session users and free-trial users:
-//   - Paid (sessions_balance >= 1): deducts one session
-//   - is_premium: passes through with no deduction
-//   - Trial (trial_seconds_used < 600): returns remaining seconds
-//   - Trial (trial_seconds_used >= 600): rejects with 'trial_expired'
+// Reads from the subscriptions table (the authoritative source since migration 004).
+// Falls back to profiles if the subscription row doesn't exist yet.
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminClient } from '@/utils/supabase/admin'
 import crypto from 'crypto'
@@ -35,41 +32,61 @@ export async function POST(request: NextRequest) {
 
     const supabase = createAdminClient()
 
-    const { data: profile, error: profErr } = await supabase
-      .from('profiles')
-      .select('sessions_balance, is_premium, trial_seconds_used')
-      .eq('id', userId)
+    // ── Use subscriptions table (migration 004) with fallback to profiles ────────
+    const { data: sub, error: subErr } = await supabase
+      .from('subscriptions')
+      .select('sessions_balance, is_premium, trial_seconds_used, trial_seconds_total, status')
+      .eq('user_id', userId)
       .maybeSingle()
 
-    if (profErr || !profile) {
-      return NextResponse.json({ error: 'Profile not found' }, { status: 404 })
-    }
-
-    const balance: number = profile.sessions_balance ?? 0
-
-    // ─── Paid session path ────────────────────────────────────────────────────
-    if (balance >= 1) {
-      const { data: updated, error: updateErr } = await supabase
+    // If subscriptions row is missing, fall back to profiles (pre-migration users)
+    if (subErr || !sub) {
+      const { data: profile, error: profErr } = await supabase
         .from('profiles')
-        .update({ sessions_balance: balance - 1 })
+        .select('sessions_balance, is_premium, trial_seconds_used')
         .eq('id', userId)
-        .select('sessions_balance')
-        .single()
+        .maybeSingle()
 
-      if (updateErr) {
-        return NextResponse.json({ error: 'Failed to deduct session' }, { status: 500 })
+      if (profErr || !profile) {
+        return NextResponse.json({ error: 'User not found' }, { status: 404 })
       }
 
+      const balance: number = profile.sessions_balance ?? 0
+
+      // premium or paid session
+      if (profile.is_premium || balance >= 1) {
+        if (balance >= 1) {
+          await supabase
+            .from('profiles')
+            .update({ sessions_balance: balance - 1 })
+            .eq('id', userId)
+        }
+        return NextResponse.json({
+          success:   true,
+          isPremium: true,
+          balance:   Math.max(0, balance - (profile.is_premium ? 0 : 1)),
+          sessionId: crypto.randomUUID(),
+        })
+      }
+
+      const secondsUsed: number = profile.trial_seconds_used ?? 0
+      const remaining = Math.max(0, TRIAL_SECONDS - secondsUsed)
+      if (remaining <= 0) {
+        return NextResponse.json({ error: 'trial_expired', message: 'Trial expired' }, { status: 402 })
+      }
       return NextResponse.json({
-        success:   true,
-        isPremium: true,
-        balance:   updated.sessions_balance,
-        sessionId: crypto.randomUUID(),
+        success:          true,
+        isPremium:        false,
+        trialTimeLeft:    remaining,
+        trialSecondsUsed: secondsUsed,
+        sessionId:        crypto.randomUUID(),
       })
     }
 
+    const balance: number = sub.sessions_balance ?? 0
+
     // ─── Premium (unlimited) path ─────────────────────────────────────────────
-    if (profile.is_premium) {
+    if (sub.is_premium) {
       return NextResponse.json({
         success:   true,
         isPremium: true,
@@ -78,27 +95,37 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    // ─── Free trial path ─────────────────────────────────────────────────────
-    // If the user has ever purchased sessions (even if all are spent), deny trial.
-    // This prevents paid users from falling back to the free trial.
-    const { count: purchaseCount } = await supabase
-      .from('purchases')
-      .select('id', { count: 'exact', head: true })
-      .eq('user_id', userId)
-      .eq('status', 'paid')
+    // ─── Paid session path ────────────────────────────────────────────────────
+    if (balance >= 1) {
+      const { data: result, error: deductErr } = await supabase.rpc('deduct_session_v2', { uid: userId })
+      if (deductErr) {
+        console.error('[start-session] deduct_session_v2 failed:', deductErr)
+        return NextResponse.json({ error: 'Failed to deduct session' }, { status: 500 })
+      }
+      if (result?.error === 'no_sessions') {
+        // Shouldn't happen (balance was ≥1) but handle gracefully
+        return NextResponse.json({ error: 'no_sessions', message: 'No sessions remaining' }, { status: 402 })
+      }
+      return NextResponse.json({
+        success:   true,
+        isPremium: true,
+        balance:   result?.sessions_balance ?? balance - 1,
+        sessionId: crypto.randomUUID(),
+      })
+    }
 
-    if ((purchaseCount ?? 0) > 0) {
+    // ─── Free trial path ─────────────────────────────────────────────────────
+    // If status is already 'trial_expired', reject immediately
+    if (sub.status === 'trial_expired' || sub.status === 'cancelled' || sub.status === 'refunded') {
       return NextResponse.json(
-        {
-          error:   'no_sessions',
-          message: 'You have no sessions remaining. Please purchase more to continue.',
-        },
+        { error: 'no_sessions', message: 'You have no sessions remaining. Please purchase more to continue.' },
         { status: 402 }
       )
     }
 
-    const secondsUsed: number = profile.trial_seconds_used ?? 0
-    const remaining = Math.max(0, TRIAL_SECONDS - secondsUsed)
+    const secondsUsed: number = sub.trial_seconds_used ?? 0
+    const total: number = sub.trial_seconds_total ?? TRIAL_SECONDS
+    const remaining = Math.max(0, total - secondsUsed)
 
     if (remaining <= 0) {
       return NextResponse.json(
@@ -125,3 +152,4 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Internal error' }, { status: 500 })
   }
 }
+

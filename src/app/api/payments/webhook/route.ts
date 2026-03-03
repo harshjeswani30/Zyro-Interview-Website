@@ -112,7 +112,7 @@ export async function POST(request: NextRequest) {
       // Don't block — still try to credit below
     }
 
-    // 6. Atomically credit sessions via RPC
+    // 6. Atomically credit sessions via RPC (profiles table — legacy)
     const { error: creditErr } = await supabase.rpc('credit_sessions', {
       p_user_id:   userId,
       p_sessions:  sessionsToCredit,
@@ -127,7 +127,60 @@ export async function POST(request: NextRequest) {
         .eq('id', userId)
     }
 
+    // 7. Update subscriptions table (new Realtime-enabled table)
+    const { error: activateErr } = await supabase.rpc('activate_premium', {
+      uid:               userId,
+      p_sessions:        sessionsToCredit,
+      p_stripe_session:  session.id,
+    })
+    if (activateErr) {
+      console.error('[webhook] activate_premium RPC failed:', activateErr)
+    }
+
     console.log(`[webhook] ✅ Credited ${sessionsToCredit} sessions to user ${userId} (plan: ${planId})`)
+  }
+
+  // ── Handle refunds ────────────────────────────────────────────────────────
+  if (event.type === 'charge.refunded' || event.type === 'payment_intent.payment_failed') {
+    const chargeOrIntent = event.data.object as any
+
+    // Try to extract userId from associated payment intent / metadata
+    let userId: string | null = null
+
+    if (event.type === 'charge.refunded') {
+      // Look up the original purchase by payment_intent id
+      const paymentIntentId = chargeOrIntent.payment_intent ?? chargeOrIntent.id
+      if (paymentIntentId) {
+        const { data: purchase } = await supabase
+          .from('purchases')
+          .select('user_id')
+          .eq('razorpay_payment_id', paymentIntentId)
+          .maybeSingle()
+        userId = purchase?.user_id ?? null
+      }
+    } else if (event.type === 'payment_intent.payment_failed') {
+      userId = chargeOrIntent.metadata?.userId ?? null
+    }
+
+    if (userId) {
+      // Mark purchase as refunded
+      if (event.type === 'charge.refunded') {
+        await supabase
+          .from('purchases')
+          .update({ status: 'refunded' })
+          .eq('razorpay_payment_id', chargeOrIntent.payment_intent ?? chargeOrIntent.id)
+      }
+
+      // Revert subscriptions table via RPC (triggers Realtime push to desktop)
+      const { error: revertErr } = await supabase.rpc('revert_premium', { uid: userId })
+      if (revertErr) {
+        console.error('[webhook] revert_premium RPC failed:', revertErr)
+      } else {
+        console.log(`[webhook] ✅ Reverted access for user ${userId} on ${event.type}`)
+      }
+    } else {
+      console.warn(`[webhook] Could not identify user for ${event.type} event ${event.id}`)
+    }
   }
 
   return NextResponse.json({ received: true })
