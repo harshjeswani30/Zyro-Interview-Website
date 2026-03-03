@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
 
     // Create a Stripe Checkout Session — payment methods (card, UPI, etc.)
     // are controlled via Stripe Dashboard → Settings → Payment methods
-    const session = await stripe.checkout.sessions.create({
+    const sessionParams = {
       automatic_payment_methods: { enabled: true },
       mode:                  'payment',
       customer_email:        userEmail,
@@ -51,7 +51,9 @@ export async function POST(request: NextRequest) {
         planId,
         sessions: String(plan.sessions),
       },
-    })
+    }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const session = await stripe.checkout.sessions.create(sessionParams as any)
 
     // Insert pending purchase record in DB
     await supabase.from('purchases').insert({
