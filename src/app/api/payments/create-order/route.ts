@@ -11,11 +11,41 @@ const PLANS: Record<string, { sessions: number; amountPaise: number; label: stri
 
 export async function POST(request: NextRequest) {
   try {
-    const { planId, userId, userEmail } = await request.json()
+    const { planId, userId, userEmail, couponCode } = await request.json()
 
     const plan = PLANS[planId]
     if (!plan) return NextResponse.json({ error: 'Invalid plan' }, { status: 400 })
     if (!userId)  return NextResponse.json({ error: 'Not authenticated' }, { status: 401 })
+
+    const supabase = createAdminClient()
+
+    // Validate coupon if provided
+    let discountPaise = 0
+    let couponId: string | null = null
+    if (couponCode) {
+      const { data: coupon } = await supabase
+        .from('coupons')
+        .select('*')
+        .eq('code', couponCode.trim().toUpperCase())
+        .eq('is_active', true)
+        .single()
+
+      if (coupon) {
+        const expired = coupon.expires_at && new Date(coupon.expires_at) < new Date()
+        const maxedOut = coupon.max_uses !== null && coupon.used_count >= coupon.max_uses
+        if (!expired && !maxedOut) {
+          if (coupon.type === 'percent') {
+            discountPaise = Math.round((plan.amountPaise * coupon.discount_value) / 100)
+          } else {
+            discountPaise = Math.round(coupon.discount_value * 100)
+          }
+          discountPaise = Math.min(discountPaise, plan.amountPaise)
+          couponId = coupon.id
+        }
+      }
+    }
+
+    const finalAmountPaise = plan.amountPaise - discountPaise
 
     // Create a Razorpay order via their REST API
     const razorpayKeyId     = process.env.RAZORPAY_KEY_ID!
@@ -28,10 +58,10 @@ export async function POST(request: NextRequest) {
         Authorization: 'Basic ' + Buffer.from(`${razorpayKeyId}:${razorpayKeySecret}`).toString('base64'),
       },
       body: JSON.stringify({
-        amount:   plan.amountPaise,
+        amount:   finalAmountPaise,
         currency: 'INR',
         receipt:  `${userId.slice(0, 8)}_${planId}_${Date.now()}`,
-        notes:    { userId, planId, sessions: String(plan.sessions) },
+        notes:    { userId, planId, sessions: String(plan.sessions), couponId: couponId ?? '' },
       }),
     })
 
@@ -44,22 +74,25 @@ export async function POST(request: NextRequest) {
     const order = await orderRes.json()
 
     // Insert pending purchase record in DB
-    const supabase = createAdminClient()
     await supabase.from('purchases').insert({
       user_id:           userId,
       plan_id:           planId,
       sessions_granted:  plan.sessions,
-      amount_paise:      plan.amountPaise,
+      amount_paise:      finalAmountPaise,
       razorpay_order_id: order.id,
       status:            'pending',
+      coupon_id:         couponId,
+      discount_paise:    discountPaise,
     })
 
     return NextResponse.json({
-      orderId:    order.id,
-      amount:     plan.amountPaise,
-      currency:   'INR',
-      keyId:      razorpayKeyId,
-      planLabel:  plan.label,
+      orderId:        order.id,
+      amount:         finalAmountPaise,
+      originalAmount: plan.amountPaise,
+      discountPaise,
+      currency:       'INR',
+      keyId:          razorpayKeyId,
+      planLabel:      plan.label,
       userEmail,
     })
   } catch (err: any) {

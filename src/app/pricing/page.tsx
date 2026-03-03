@@ -1,8 +1,18 @@
 'use client'
 import { useState, useEffect } from 'react'
-import { Check, Shield, ArrowRight } from 'lucide-react'
+import { Check, Shield, ArrowRight, Tag, X } from 'lucide-react'
 import Link from 'next/link'
 import { createClient } from '@/utils/supabase/client'
+
+interface CouponResult {
+  valid: boolean
+  error?: string
+  couponId?: string
+  code?: string
+  type?: 'percent' | 'fixed'
+  discountValue?: number
+  description?: string
+}
 
 interface Plan {
   id: string
@@ -104,10 +114,50 @@ export default function PricingPage() {
   const [loadingPlan, setLoadingPlan] = useState<string | null>(null)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  // Coupon state
+  const [couponInput, setCouponInput] = useState('')
+  const [couponLoading, setCouponLoading] = useState(false)
+  const [coupon, setCoupon] = useState<CouponResult | null>(null)
+
   useEffect(() => {
     const supabase = createClient()
     supabase.auth.getUser().then(({ data }) => setUser(data.user ?? null))
   }, [])
+
+  const getDiscountedPrice = (priceINR: number): { original: number; final: number; savingINR: number } => {
+    if (!coupon?.valid || !coupon.type) return { original: priceINR, final: priceINR, savingINR: 0 }
+    let savingINR = 0
+    if (coupon.type === 'percent') {
+      savingINR = Math.round((priceINR * coupon.discountValue!) / 100)
+    } else {
+      savingINR = Math.min(coupon.discountValue!, priceINR)
+    }
+    return { original: priceINR, final: priceINR - savingINR, savingINR }
+  }
+
+  const handleApplyCoupon = async () => {
+    if (!couponInput.trim()) return
+    setCouponLoading(true)
+    setCoupon(null)
+    try {
+      const res = await fetch('/api/payments/validate-coupon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: couponInput.trim() }),
+      })
+      const data = await res.json()
+      setCoupon(data)
+    } catch {
+      setCoupon({ valid: false, error: 'Could not validate coupon. Please try again.' })
+    } finally {
+      setCouponLoading(false)
+    }
+  }
+
+  const handleRemoveCoupon = () => {
+    setCoupon(null)
+    setCouponInput('')
+  }
 
   const loadRazorpay = () =>
     new Promise<void>((resolve, reject) => {
@@ -141,7 +191,12 @@ export default function PricingPage() {
       const orderRes = await fetch('/api/payments/create-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ planId: plan.id, userId: user.id, userEmail: user.email }),
+        body: JSON.stringify({
+          planId: plan.id,
+          userId: user.id,
+          userEmail: user.email,
+          couponCode: coupon?.valid ? coupon.code : undefined,
+        }),
       })
       const orderData = await orderRes.json()
       if (!orderRes.ok) {
@@ -246,11 +301,28 @@ export default function PricingPage() {
               <div className="mb-6 mt-2">
                 <h3 className="text-xl font-bold mb-1">{plan.name}</h3>
                 <p className="text-white/40 text-sm mb-4">{plan.description}</p>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-4xl font-black">
-                    {plan.priceINR === 0 ? '₹0' : `₹${plan.priceINR.toLocaleString('en-IN')}`}
-                  </span>
-                </div>
+                {(() => {
+                  const { original, final, savingINR } = plan.isPaid
+                    ? getDiscountedPrice(plan.priceINR)
+                    : { original: 0, final: 0, savingINR: 0 }
+                  return (
+                    <div className="flex items-baseline gap-2 flex-wrap">
+                      <span className="text-4xl font-black">
+                        {plan.priceINR === 0 ? '₹0' : `₹${final.toLocaleString('en-IN')}`}
+                      </span>
+                      {savingINR > 0 && (
+                        <>
+                          <span className="text-white/30 line-through text-xl">
+                            ₹{original.toLocaleString('en-IN')}
+                          </span>
+                          <span className="text-green-400 text-xs font-bold bg-green-500/10 px-2 py-0.5 rounded-full">
+                            -₹{savingINR}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  )
+                })()}
                 {plan.perSession && (
                   <p className="text-white/40 text-xs mt-1">{plan.perSession}</p>
                 )}
@@ -286,6 +358,63 @@ export default function PricingPage() {
               </button>
             </div>
           ))}
+        </div>
+
+        {/* Coupon Code Section */}
+        <div className="max-w-md mx-auto mt-10 animate-fade-in">
+          {coupon?.valid ? (
+            <div className="glass-card p-4 border-green-500/30 bg-green-500/5">
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <Tag className="w-4 h-4 text-green-400" />
+                  <span className="font-bold text-green-400">{coupon.code}</span>
+                  <span className="text-white/60 text-sm">
+                    {coupon.type === 'percent'
+                      ? `${coupon.discountValue}% off applied`
+                      : `₹${coupon.discountValue} off applied`}
+                  </span>
+                </div>
+                <button
+                  onClick={handleRemoveCoupon}
+                  className="text-white/40 hover:text-white/80 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              {coupon.description && (
+                <p className="text-white/40 text-xs mt-1 ml-6">{coupon.description}</p>
+              )}
+            </div>
+          ) : (
+            <div className="glass-card p-4">
+              <p className="text-white/50 text-xs font-medium mb-3 uppercase tracking-wider flex items-center gap-1">
+                <Tag className="w-3 h-3" /> Have a coupon code?
+              </p>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={couponInput}
+                  onChange={(e) => {
+                    setCouponInput(e.target.value.toUpperCase())
+                    if (coupon) setCoupon(null)
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleApplyCoupon()}
+                  placeholder="ENTER CODE"
+                  className="flex-1 bg-white/5 border border-white/10 rounded-xl px-4 py-2 text-sm font-mono text-white placeholder-white/20 focus:outline-none focus:border-primary/50 transition-colors"
+                />
+                <button
+                  onClick={handleApplyCoupon}
+                  disabled={couponLoading || !couponInput.trim()}
+                  className="px-4 py-2 bg-primary/20 border border-primary/30 text-primary rounded-xl text-sm font-bold hover:bg-primary/30 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {couponLoading ? '…' : 'Apply'}
+                </button>
+              </div>
+              {coupon?.error && (
+                <p className="text-red-400 text-xs mt-2">{coupon.error}</p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Auth nudge */}

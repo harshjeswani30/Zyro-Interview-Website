@@ -60,6 +60,11 @@ export async function POST(request: NextRequest) {
       .update({ sessions_balance: currentBalance + purchase.sessions_granted, trial_seconds_used: 600 })
       .eq('id', userId)
 
+    // 5. Increment coupon used_count if a coupon was applied
+    if (purchase.coupon_id) {
+      await supabase.rpc('increment_coupon_usage', { coupon_id_arg: purchase.coupon_id })
+    }
+
     return NextResponse.json({
       success:       true,
       sessionsAdded: purchase.sessions_granted,
